@@ -14,3 +14,4 @@ The Linear regression model highlights the factors contributing most to industri
 The cluster analysis shows areas with a similar growth pattern to Auckland's. This analysis highlights Tauranga City as an area with the highest industrial economic growth and the potential to remain a key growth area. This conclusion is further supported by a forecast analysis for the next ten years, which continued to show Tauranga City as a main growing area in the country. 
 As a result of this analysis, it is recommended for Spark to focus on Tauranga City and explore the economic profile of areas in Tauranga City using the economic factors noted in the linear regression results.  
 
+Attached are the datasets, R-code for the analysis followed by a report documenting the analysis, findings and recommendations from the analysis and further research.
