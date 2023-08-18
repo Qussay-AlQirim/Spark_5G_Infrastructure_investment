@@ -1,4 +1,4 @@
-# 5G-Infrastructure-investment
+# Spark 5G Infrastructure investment
 
 This report aims to predict New Zealand's growth areas for developing 5G infrastructure. The methods used to reach and support the findings are divided into Linear regression, Cluster and Forecast Analysis.
 The Linear regression model highlights the factors contributing most to industrial GDP. Our analysis shows that these are the following factors that play a significant role in industrial GDP and can indicate the economic potential of that area:
