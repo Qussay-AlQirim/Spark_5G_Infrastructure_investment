@@ -1,0 +1,1345 @@
+---
+title: "Identifying Regions of Growth in New Zealand - Spark Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+# Load the required Libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(car)
+library(stringr)
+library(caret)
+library(ggplot2)
+library(ggmap)
+library(GGally)
+library(corrplot)
+library(readxl)
+library(forecast)
+library(fpp2)
+library(ggfortify)
+library(reshape)
+library(plm)
+library(plotly)
+library(zoo)
+library(imputeTS)
+library(skimr)
+library(SmartEDA)
+library(Hmisc)
+library(factoextra)
+library(tibble)
+library(gplots)
+library(tseries)
+library(lmtest)
+library(tidyverse)
+library(lubridate)
+library(dtwclust)
+library(TSdist)
+library(glmnet)
+library(tidyquant)
+library(rminer)
+library(parsnip)
+library(rsample)
+library(modeltime)
+```
+
+# Import the required data sets
+```{r}
+df <- read.csv("Main_Dataset.csv")
+
+df2 <- read_xlsx("Dataset_filtered(2000-2019).xlsx")
+
+df3 <- read.csv("Calculated_GDP_Enterprise_Employee_Columns.csv")
+
+df_scaled2 <- read.csv("Scaled_data(2000-2019).csv")
+```
+
+# Exploring structure of the data frame
+```{r}
+str(df)
+
+df$Year <- as.numeric(df$Year)
+
+str(df$Year)
+```
+
+
+#Drop the x column
+```{r}
+df <- df %>% select(-X.1, -X)
+```
+
+
+#Number of Missing Values of Main Dataset
+```{r}
+# Number of missing values in df 
+table(is.na(df))
+      
+      number_missing <- sapply(df, function(x) sum(is.na(x)))
+      num_missing <- data.frame(number_missing)
+      
+      Missing <- sapply(df, function(x) (((sum(is.na(x)))/(nrow(df)))*100))
+      
+      Missing_df <- data.frame(Missing)
+      
+Missing_df
+
+
+# remove rows where Area.Code is NA
+df <- df[complete.cases(df$Area.Code),]
+```
+
+
+# Number of Missing Values for Chatham Island
+```{r}
+# Create Dataset containing only Chatham Islands
+chatham_data <- df[df$Region.Title == "Chatham Islands Territory", ]
+
+# Find the number of non missing values in the Chatham Dataset 
+total_values <- sum(!is.na(chatham_data))
+total_values
+
+# Find the number of missing values in the Chatham Dataset
+chatham_missing <- sum(is.na(chatham_data))
+chatham_missing
+
+# Find the totla number of cells in the Dataset
+Total_Number_Cells <- chatham_missing + total_values
+Total_Number_Cells
+
+# Calculate the percentage of missing values in the "Chatham Islands Territory" region
+chatham_percent_missing <- chatham_missing / Total_Number_Cells * 100
+
+# Print the percentage of missing values
+cat("Percentage of missing values in Chatham Islands Territory: ", chatham_percent_missing, "%")
+```
+
+
+
+# Number of Missing Values for Area Outside Territory
+```{r}
+# Create Dataset containing only Area Outside Territorial Authority
+Area_Outside_data <- df[df$Region.Title == "Area Outside Territorial Authority", ]
+
+# Find the number of non missing values in the Area Outside Territorial Authority Dataset 
+total_values2 <- sum(!is.na(Area_Outside_data))
+total_values2
+
+# Find the number of missing values in the Area Outside Territorial Authority Dataset
+Area_Outside_Missing <- sum(is.na(Area_Outside_data))
+Area_Outside_Missing
+
+# Find the totla number of cells in the Dataset
+Total_Number_Cells2 <- Area_Outside_Missing + total_values2
+Total_Number_Cells2
+
+# Calculate the percentage of missing values in the "Area Outside Territorial Authority" region
+Area_Outside_Missing <- Area_Outside_Missing / Total_Number_Cells2 * 100
+
+# Print the percentage of missing values
+cat("Percentage of missing values in Area Outside Territorial Authority: ", Area_Outside_Missing, "%")
+
+```
+
+
+# Drop rows where with large number of missing values
+```{r}
+df <- df %>% subset(Region.Title != 'Chatham Islands Territory' & Region.Title != "Area Outside Territorial Authority")
+```
+
+
+# Explore number of Duplicate Values
+```{r}
+
+dup_df <- df[duplicated(df[c("Year", "Area.Code")]) | duplicated(df[c("Year", "Area.Code")], fromLast = TRUE), ]
+
+unique_code <- unique(dup_df$Area.Code)
+unique_code
+
+```
+
+
+# Dropping columns where number of missing values is greater than 70%
+```{r}
+df <- df %>% select(-Employment.Annual.Average.Unemployment.Rate,
+                    -Tourism.Total.International.Visits,
+                    -Property.Total.Affiliation,
+                    -Population.Population.Projection.2023.Onward,
+                    -Employment.Annual.Average.Employment.Rate,
+                    -Employment.Average.Filled.Jobs,
+                    -Income.Average.Total.Earnings.Millions,
+                    -Economy.Activities...Annual_Actual_Retail_Sales_Values..million.dollars.,
+
+)
+```
+
+# Converting TA.Title to numeric
+```{r}
+#TA.Title
+df$TA.Title <- sub("^\\D*0*", "", df$Area.Code)
+df$TA.Title <- as.numeric(df$TA.Title)
+```
+
+
+
+# Imputing the missing values
+# Input other teams codes for imputing their columns
+
+#Economy Activities - GDP per capita (dollars) - Back Casting Method
+```{r}
+
+# Subset the data for the relevant columns
+df_sub <- subset(df[, c("Year", "Area.Code", "Economy.Activities...GDP.per.capita..dollars.")], Year >= 2000 & Year <= 2019)
+
+# Function to reverse time
+reverse_ts <- function(y)
+{
+  ts(rev(y), start=tsp(y)[1L], frequency=frequency(y))
+}
+
+# Function to reverse a forecast
+reverse_forecast <- function(object)
+{
+  h <- length(object[["mean"]])
+  f <- frequency(object[["mean"]])
+  object[["x"]] <- reverse_ts(object[["x"]])
+  object[["mean"]] <- ts(rev(object[["mean"]]),
+    end=tsp(object[["x"]])[1L]-1/f, frequency=f)
+  object[["lower"]] <- object[["lower"]][h:1L,]
+  object[["upper"]] <- object[["upper"]][h:1L,]
+  return(object)
+}
+
+# Specify the number of periods to forecast
+h <- 9
+
+# Loop over each unique Area.Code and generate forecasts
+forecasts <- list()
+for (code in unique(df_sub$Area.Code)) {
+  # Subset the data for the current Area.Code
+  sub_df <- df_sub[df_sub$Area.Code == code, ]
+  
+  # Check if there are enough observations to generate a forecast
+  if (nrow(sub_df) > 2 * h) {
+    # Reverse time
+    revx <- ts(rev(sub_df[,"Economy.Activities...GDP.per.capita..dollars."]), start=2000, frequency=1)
+    # Generate the forecast
+    fc <- forecast(auto.arima(revx), h)
+    # Reverse the forecast
+    bc <- reverse_forecast(fc)
+    # Add the forecast to the list
+    forecasts[[code]] <- bc
+    
+    # Visualize the forecast Results
+    plot(bc, xlim=c(1990,2020), main = paste("Forecast Results for Area Code: ", code))
+    
+    # Print the Forecast Results
+    cat("Area Code:", code, "\n")
+    print(bc, main = paste("Forecast Results for Area Code", code))
+    cat("\n")
+    
+    
+  }
+}
+
+# Access the forecast for a specific Area.Code
+forecasts[["T001"]]
+
+```
+
+
+
+# Imputing missing values for Household Average Income
+```{r}
+# Loop over each unique Area.Code and impute missing values
+imputed_data <- data.frame()
+
+for (code in unique(df$Area.Code)) {
+  # Subset the data for the current Area.Code
+  data_code <- df[df$Area.Code == code, ]
+  
+  # Check if there are enough observations to impute missing values
+  if (nrow(data_code) > 0) {
+    # Create a time series object
+    ts_data <- ts(data_code[,"Household.Average.Income"], frequency = frequency(data_code$Year))
+    
+    ts_data <- as.numeric(ts_data)
+    
+    # Check if there are at least 3 non-NA data points
+    if (sum(!is.na(ts_data)) >= 3) {
+      # Impute missing values using Kalman smoothing
+      imputed_ts_data <- na_kalman(ts_data)
+      
+      # Store the imputed time series data
+      data_code[,"Household.Average.Income"] <- imputed_ts_data
+    }
+    
+    # Combine the imputed data
+    imputed_data <- rbind(imputed_data, data_code)
+  }
+}
+
+```
+
+
+# Area Code List
+```{r}
+df_area_code <- unique(df$Area.Code)
+
+df_area_code <- data.frame(df_area_code)
+```
+
+# The dataset's missing values were imputed by the team into a spreadsheet named filtered dataset with years 2000 - 2019.
+
+# Exploring the Filtered Dataset
+```{r}
+
+# Structure of the dataset
+str(df2)
+
+
+
+# Number of missing values in df2
+table(is.na(df2))
+      
+      number_missing2 <- sapply(df2, function(x) sum(is.na(x)))
+      num_missing2 <- data.frame(number_missing2)
+      
+      Missing2 <- sapply(df2, function(x) (((sum(is.na(x)))/(nrow(df)))*100))
+      
+      Missing_df2 <- data.frame(Missing2)
+      
+Missing_df2
+
+# Explore the data frame
+ExpData(df2, type=2)
+
+```
+
+
+#Normalising/Scaling the Data
+```{r}
+# Create function to apply the formula
+
+my_fun <- function(x) {
+  if (max(x) - min(x) == 0) {
+    return(rep(0, length(x)))
+  } else {
+    return((x - min(x)) / (max(x) - min(x)))
+  }
+}
+
+# Create New Scaled Columns to Normalise the data and put them in the original dataset
+scaled_data <- df2 %>% 
+   group_by(Area.Code) %>% 
+   mutate(
+     across(
+       .cols = where(is.numeric),
+       .fns = my_fun,
+       .names = "{.col}_Scaled"
+     )
+   )
+```
+
+# Removing columns from data frame
+```{r}
+# Filter year_scaled from dataset
+scaled_data <- scaled_data %>% select(-Year_Scaled, -`TA Title_Scaled`)
+```
+
+
+# Evaluating the number of missing values in data frame
+```{r}
+# Evaluating the percentage of missing values for scaled_data
+table(is.na(scaled_data))
+      
+      number_missing3 <- sapply(scaled_data, function(x) sum(is.na(x)))
+      num_missing3 <- data.frame(number_missing3)
+      
+      Missing3 <- sapply(scaled_data, function(x) (((sum(is.na(x)))/(nrow(scaled_data)))*100))
+      
+      Missing_df3 <- data.frame(Missing3)
+      
+Missing_df3
+```
+
+
+# Create a new dataset with scaled values
+```{r}
+# Create new dataset with scaled values only
+df_scaled <- scaled_data %>%
+  select(Year,Area.Code,`TA Title`,`Region Title`, ends_with("_Scaled"))
+```
+
+
+# Evaluating the number of missing values
+```{r}
+# Evaluating the percentage of missing values on df_scaled
+table(is.na(df_scaled))
+      
+      number_missing4 <- sapply(df_scaled, function(x) sum(is.na(x)))
+      num_missing4 <- data.frame(number_missing4)
+      
+      Missing4 <- sapply(df_scaled, function(x) (((sum(is.na(x)))/(nrow(df_scaled)))*100))
+      
+      Missing_df4 <- data.frame(Missing4)
+      
+Missing_df4
+```
+
+
+# Performing Analysis on Scaled Dataset
+```{r}
+
+#Syntax to change column names using rename()
+
+df_numeric <- df_scaled %>% ungroup() %>% select_if(is.numeric) %>% select(-Year, -`TA Title`)
+
+
+```
+
+
+# Drop all the regional industry GDP columns to avoid data leakage
+```{r}
+# Drop  Regional Industry GDP columns
+
+df_numeric <- df_numeric %>% select(-`Regional Industry GDP-Wholesale Trade ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Transport, Postal And Warehousing ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Retail Trade ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Rental, Hiring And Real Estate Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Public Administration And Safety ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Professional, Scientific And Technical Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Owner Occupied Property Operation ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Manufacturing ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Information Media, Telecommunications And Other Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Health Care And Social Assistance ($ M)_Scaled`,
+                                    -`Regional Industry GDP-GST On Production, Import Duties and Other Taxes ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Forestry, Fishing, Mining, Electricity, Gas, Water and Waste Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Food And Beverage Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Financial And Insurance Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Education And Training ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Construction ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Agriculture ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Administrative And Support Services ($ M)_Scaled`,
+                                    -`Regional Industry GDP-Accommodation ($ M)_Scaled`)
+```
+
+
+
+# Explore the structure of the dataset
+```{r}
+# Analyse structure of dataset
+
+str(df_numeric)
+
+
+ExpNumStat(df_numeric, by = "A", Outlier = TRUE, round = 2)
+```
+
+
+# Correlation Matrix using normalised data
+```{r}
+# Correlation
+
+# This function provides a simple formatting of a correlation matrix
+# into a table with 4 columns containing :
+    # Column 1 : row names (variable 1 for the correlation test)
+    # Column 2 : column names (variable 2 for the correlation test)
+    # Column 3 : the correlation coefficients
+    # Column 4 : the p-values of the correlations
+flat_cor_mat <- function(cor_r, cor_p){
+  cor_r <- rownames_to_column(as.data.frame(cor_r), var = "row")
+  cor_r <- gather(cor_r, column, cor, -1)
+  cor_p <- rownames_to_column(as.data.frame(cor_p), var = "row")
+  cor_p <- gather(cor_p, column, p, -1)
+  cor_p_matrix <- left_join(cor_r, cor_p, by = c("row", "column"))
+  cor_p_matrix
+}
+
+cor_1 <- rcorr(as.matrix(df_numeric[, 1:57]))
+
+my_cor_matrix <- flat_cor_mat(cor_1$r, cor_1$P)
+head(my_cor_matrix)
+
+# Filtering Column 2 to show only Regional Industry GDP-Annual Total ($ M)_Scaled
+my_cor_matrix <- my_cor_matrix[my_cor_matrix$column == "Regional Industry GDP-Annual Total ($ M)_Scaled", ]
+
+# Filtering Cor values < 0.5 and P values > 0.05
+my_cor_matrix <- my_cor_matrix[my_cor_matrix$p <= 0.05 & (my_cor_matrix$cor >= 0.5 & my_cor_matrix$cor < 0.9),]
+
+# Remove rows with missing values
+my_cor_matrix <- na.omit(my_cor_matrix)
+
+# Removing the p-value column
+my_cor_matrix <- my_cor_matrix %>% select(-p)
+
+# Turn the data frame back into a matrix
+correlation_mtx <- reshape2::acast(my_cor_matrix, row~column, value.var="cor")
+correlation_mtx
+
+# Visualize the correlation matrix
+corrplot(correlation_mtx, method = 'color', type = 'lower', addCoef.col = 'white')
+
+
+
+```
+
+
+# Prepare a dataset from PCA using variables with correlation greater than or equal to 0.5 and less than 0.9
+```{r}
+
+# Prepare dataset for PCA analysis
+data <- df_numeric %>% select(`Housing-Average Number of Active Bonds Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind K_Enterprise Count_Scaled`,
+                              `Property-Regional Median Home Price Index ($)_Scaled`,
+                              `Population Estimation - 40-64 Yrs Old Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind L_Enterprise Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind M_Enterprise Count_Scaled`,
+                              `Local Authority Financial Stat- Total Government Spending ($ K)_Scaled`,
+                              `Population Estimation - Total Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind S_Enterprise Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind N_Enterprise Count_Scaled`,
+                              `Business Demography-Annual Total Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind E_Enterprise Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind E_Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind H_Enterprise Count_Scaled`,
+                              `Business Demography-Annual Total Enterprise Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind Q_Enterprise Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind H_Employee Count_Scaled`, 
+                              `Business Demography-ANZSIC_Ind S_Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind Q_Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind M_Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind P_Employee Count_Scaled`,
+                              `Business Demography-ANZSIC_Ind O_Employee Count_Scaled`)
+```
+
+
+# Principle Component Analysis
+```{r}
+# PCA 
+
+my_data1 <- data
+
+cor_matrix1 <- cor(my_data1, use = 'complete.obs')
+data.pca <- princomp(cor_matrix1, cor = TRUE)
+pca_var <- get_pca_var(data.pca)
+pca_var$contrib
+pca_var$coord
+summary(data.pca)
+
+# Quality of representation of the variables for Dim 1 and Dim 2
+head(pca_var$cos2,4)
+
+# Contribution of variables to PC1
+fviz_contrib( data.pca, choice = "var", axes = 1)
+
+# Contribution of variables to PC2
+fviz_contrib( data.pca, choice = "var", axes = 2)
+
+# Contribution of Variables to PC1 & PC2
+#This reference line corresponds to the expected value if the contribution where uniform. For a given dimension, any row/column with a contribution above the reference line could be considered as important in contributing to the dimension.
+pca_plotly <- fviz_contrib( data.pca, choice = "var", axes = 1:2, xlab.angle = 45)
+ggplotly(pca_plotly)
+
+# Visualizing the variables that are contributing the most
+fviz_pca_var(data.pca, 
+             col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)
+```
+
+
+# In order to reduce the multicollinearity issue between the variables certain columns were transformed to growth percentages.
+
+# Trasforming Certain Columns in the filtered dataset: Transforming columns and end with the suffix "_Calc"
+```{r}
+
+df2 <- 
+  df2 %>% 
+    group_by(Year, Area.Code,`Region Title`) %>% 
+    mutate(`Annual GDP Increase Percent_Calc`=((`Regional Industry GDP-Annual Total ($ M)`-lag(`Regional Industry GDP-Annual Total ($ M)`))/lag(`Regional Industry GDP-Annual Total ($ M)`)),
+           `Annual Enterprise Increase Percent_Calc`=((`Business Demography-Annual Total Enterprise Count` -lag(`Business Demography-Annual Total Enterprise Count`))/lag(`Business Demography-Annual Total Enterprise Count`)),
+           `Annual Employee Increase Percent_Calc`=((`Business Demography-Annual Total Employee Count` -lag(`Business Demography-Annual Total Employee Count`))/lag(`Business Demography-Annual Total Employee Count`)),
+           `Percent In Total Population (0-14 Yrs Old)_Calc`=`Population Estimation - 0-14 Yrs Old Count`/ `Population Estimation - Total Count`,
+           `Percent In Total Population (15-39 Yrs Old)_Calc`=`Population Estimation - 15-39 Yrs Old Count`/`Population Estimation - Total Count`,
+           `Percent In Total Population (40-64 Yrs Old)_Calc`=`Population Estimation - 40-64 Yrs Old Count`/`Population Estimation - Total Count`,
+           `Percent In Total Population (65 Yrs Old and Over)_Calc`=`Population Estimation - 65 Yrs Old and over Count`/`Population Estimation - Total Count`,
+           `Percent In Total Enterprise Count (Industry A)_Calc`=`Business Demography-ANZSIC_Ind A_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry B)_Calc`=`Business Demography-ANZSIC_Ind B_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry C)_Calc`=`Business Demography-ANZSIC_Ind C_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry D)_Calc`=`Business Demography-ANZSIC_Ind D_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry E)_Calc`=`Business Demography-ANZSIC_Ind E_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry F)_Calc`=`Business Demography-ANZSIC_Ind F_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry G)_Calc`=`Business Demography-ANZSIC_Ind G_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry H)_Calc`=`Business Demography-ANZSIC_Ind H_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry I)_Calc`=`Business Demography-ANZSIC_Ind I_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry J)_Calc`=`Business Demography-ANZSIC_Ind J_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry K)_Calc`=`Business Demography-ANZSIC_Ind K_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry L)_Calc`=`Business Demography-ANZSIC_Ind L_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry M)_Calc`=`Business Demography-ANZSIC_Ind M_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry N)_Calc`=`Business Demography-ANZSIC_Ind N_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry O)_Calc`=`Business Demography-ANZSIC_Ind O_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry P)_Calc`=`Business Demography-ANZSIC_Ind P_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry Q)_Calc`=`Business Demography-ANZSIC_Ind Q_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry R)_Calc`=`Business Demography-ANZSIC_Ind R_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Enterprise Count (Industry S)_Calc`=`Business Demography-ANZSIC_Ind S_Enterprise Count`/`Business Demography-Annual Total Enterprise Count`,
+           `Percent In Total Employee Count (Industry A)_Calc`=`Business Demography-ANZSIC_Ind A_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry B)_Calc`=`Business Demography-ANZSIC_Ind B_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry C)_Calc`=`Business Demography-ANZSIC_Ind C_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry D)_Calc`=`Business Demography-ANZSIC_Ind D_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry E)_Calc`=`Business Demography-ANZSIC_Ind E_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry F)_Calc`=`Business Demography-ANZSIC_Ind F_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry G)_Calc`=`Business Demography-ANZSIC_Ind G_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry H)_Calc`=`Business Demography-ANZSIC_Ind H_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry I)_Calc`=`Business Demography-ANZSIC_Ind I_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry J)_Calc`=`Business Demography-ANZSIC_Ind J_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry K)_Calc`=`Business Demography-ANZSIC_Ind K_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry L)_Calc`=`Business Demography-ANZSIC_Ind L_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry M)_Calc`=`Business Demography-ANZSIC_Ind M_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry N)_Calc`=`Business Demography-ANZSIC_Ind N_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry O)_Calc`=`Business Demography-ANZSIC_Ind O_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry P)_Calc`=`Business Demography-ANZSIC_Ind P_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry Q)_Calc`=`Business Demography-ANZSIC_Ind Q_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry R)_Calc`=`Business Demography-ANZSIC_Ind R_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Employee Count (Industry S)_Calc`=`Business Demography-ANZSIC_Ind S_Employee Count`/ `Business Demography-Annual Total Employee Count`,
+           `Percent In Total Regional GDP (Wholesale Trade)_Calc`=`Regional Industry GDP-Wholesale Trade ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Transport, Postal And Warehousing)_Calc`=`Regional Industry GDP-Transport, Postal And Warehousing ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Retail Trade)_Calc`=`Regional Industry GDP-Retail Trade ($ M)` /`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Rental, Hiring And Real Estate Services)_Calc`=`Regional Industry GDP-Rental, Hiring And Real Estate Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Public Administration And Safety)_Calc`=`Regional Industry GDP-Public Administration And Safety ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Professional, Scientific And Technical Services)_Calc`=`Regional Industry GDP-Professional, Scientific And Technical Services ($ M)` /`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Owner Occupied Property Operation)_Calc`=`Regional Industry GDP-Owner Occupied Property Operation ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Manufacturing)_Calc`=`Regional Industry GDP-Manufacturing ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Information Media, Telecommunications And Other Services)_Calc`=`Regional Industry GDP-Information Media, Telecommunications And Other Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Health Care And Social Assistance)_Calc`=`Regional Industry GDP-Health Care And Social Assistance ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (GST On Production, Import Duties and Other Taxes)_Calc`=`Regional Industry GDP-GST On Production, Import Duties and Other Taxes ($ M)` /`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Forestry, Fishing, Mining, Electricity, Gas, Water and Waste Services)_Calc`=`Regional Industry GDP-Forestry, Fishing, Mining, Electricity, Gas, Water and Waste Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Food And Beverage Services)_Calc`=`Regional Industry GDP-Food And Beverage Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Financial And Insurance Services)_Calc`=`Regional Industry GDP-Financial And Insurance Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Education And Training)_Calc`=`Regional Industry GDP-Education And Training ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Construction)_Calc`=`Regional Industry GDP-Construction ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Agriculture)_Calc`=`Regional Industry GDP-Agriculture ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Administrative And Support Services)_Calc`=`Regional Industry GDP-Administrative And Support Services ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           `Percent In Total Regional GDP (Accommodation)_Calc`=`Regional Industry GDP-Accommodation ($ M)`/`Regional Industry GDP-Annual Total ($ M)`,
+           ) %>%
+    mutate(`Annual GDP Increase Percent_Calc`=ifelse(is.na(`Annual GDP Increase Percent_Calc`),0,`Annual GDP Increase Percent_Calc`),
+           `Annual Enterprise Increase Percent_Calc`=ifelse(is.na(`Annual Enterprise Increase Percent_Calc`),0,`Annual Enterprise Increase Percent_Calc`),
+           `Annual Employee Increase Percent_Calc`=ifelse(is.na(`Annual Employee Increase Percent_Calc`),0,`Annual Employee Increase Percent_Calc`))
+
+
+```
+
+
+# Error in the following columns: "Annual GDP Increase Percent_Calc", "Annual Enterprise Increase_Calc", "Annual Employee Increase_Calc". All columns displaying zero values only
+
+# Merge dataset with newly calculated values for those 3 columns 
+```{r}
+# Remove unnecessary columns from the dataframe
+str(df3)
+df3 <- df3 %>% select(-TA.Title, -Region.Title, -X)
+
+
+# Merge the newly calculated values into the original data frame and copy the data into a new data frame
+df4 <- merge(x = df2, y = df3, by = c("Year", "Area.Code"), all.x = TRUE)
+
+# Drop the the columns displaying the error
+df4 <- df4 %>% select(-`Annual GDP Increase Percent_Calc`, -`Annual Enterprise Increase Percent_Calc`, -`Annual Employee Increase Percent_Calc`)
+
+```
+
+
+# Prepare the data frame into panel data
+```{r}
+# Convrt to panel data
+df_reg <- pdata.frame(df4, index = c("Year","Area.Code"))
+
+# Convert Year Column to Date Format
+df_reg$Year <- ymd(df_reg$Year, truncated = 2L)
+
+```
+
+#Testing Normality on the filtered dataset (df2)
+
+# QQ plot on filtered dataset (df2)
+```{r}
+# Create new dataset from df2 and includes only numeric variables
+normality_test <- df2  %>% select_if(is.numeric)
+
+
+# Loop through columns normality_test and generate QQ plots
+for (col in names(normality_test)) {
+  if(is.numeric(normality_test[[col]])) {
+    p <- ggplot(normality_test, aes(sample = .data[[col]])) +
+      stat_qq() +
+      stat_qq_line() +
+      labs(title = col)
+    print(p)
+  }
+}
+```
+
+# Columns did not display a normal distribution in the filtered dataset, those columns were logged in the calculated dataset (df_reg)
+
+# Normality of the calculated dataset df_reg - All columns
+```{r}
+# Logging the Values
+
+# Log the values in the dataset
+log_transform <- function(df) {
+  for (i in 5:ncol(df)) {
+    if (is.numeric(df[[i]])) {
+      df[[i]] <- ifelse(df[[i]] == 0, 0, log(df[[i]]))
+    }
+  }
+  return(df)
+}
+
+# Perform the function on the dataset and insert into a new dataset
+df_reg <- log_transform(df_reg)
+
+```
+
+
+# dataframe has infinity values
+```{r}
+
+for (col in names(df_reg)[5:length(df_reg)]) {
+  df_reg[[col]][!is.finite(df_reg[[col]])] <- 0
+}
+
+```
+
+# Missing Values Check
+```{r}
+# Missing values
+table(is.na(df_reg))
+      
+      number_missing5 <- sapply(df_reg, function(x) sum(is.na(x)))
+      num_missing5 <- data.frame(number_missing5)
+      
+      Missing5 <- sapply(df_reg, function(x) (((sum(is.na(x)))/(nrow(df_reg)))*100))
+      
+      Missing_df5 <- data.frame(Missing5)
+      
+Missing_df5
+
+
+```
+
+
+# Splitting the data into test and train data
+```{r}
+# Load the required libraries
+library(caret)
+
+# Splitting the test and train data into 80%/20% ratio
+train <- df_reg %>% 
+              filter(year(Year) < 2016)
+test <- df_reg %>% 
+              filter( year(Year) >= 2016)
+
+
+range(as.Date(train$Year))
+range(as.Date(test$Year))
+
+```
+
+
+
+# Linear Regression Model before PCA
+```{r}
+lm_pre_PCA <- lm(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Population.Estimation...Total.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.S._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.H._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.H._Calc +
+                   Percent.In.Total.Employee.Count..Industry.S._Calc +
+                   Percent.In.Total.Employee.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.M._Calc +
+                   Percent.In.Total.Employee.Count..Industry.P._Calc +
+                   Percent.In.Total.Employee.Count..Industry.O._Calc,
+                  data = train)
+
+summary(lm_pre_PCA)
+plot(lm_pre_PCA)
+
+
+
+```
+
+
+
+
+# Linear Regression Model Post PCA
+```{r}
+
+lm_post_PCA <- lm(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc,
+                  data = train)
+
+summary(lm_post_PCA)
+plot(lm_post_PCA)
+
+```
+
+
+# Testing for Multicollinearity on Train dataset for Pre PCA Model
+```{r}
+
+# testing for multicollinearity 
+df_multicoll <- car::vif(lm_pre_PCA)
+
+# Converting the values into a data frame
+df_multicoll <- data.frame(df_multicoll)
+
+```
+
+# Testing for Multicollinearity on Train dataset for Post PCA Model
+```{r}
+
+# testing for multicollinearity 
+df_multicoll2 <- car::vif(lm_post_PCA)
+
+# Converting the values into a data frame
+df_multicoll2 <- data.frame(df_multicoll2)
+
+```
+
+# Lasso Regression on test and train datasets for Pre-PCA
+```{r}
+
+
+# Prepare Train data:
+glm_model_train <- train %>%
+    select(Year,
+           Area.Code,
+           TA.Title,
+           Region.Title,
+           Regional.Industry.GDP.Annual.Total....M.,
+           Housing.Average.Number.of.Active.Bonds.Count,
+           Percent.In.Total.Enterprise.Count..Industry.K._Calc,
+           Property.Regional.Median.Home.Price.Index....,
+           Percent.In.Total.Population..40.64.Yrs.Old._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.L._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.M._Calc,
+           Local.Authority.Financial.Stat..Total.Government.Spending....K.,
+           Population.Estimation...Total.Count,
+           Percent.In.Total.Enterprise.Count..Industry.S._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.N._Calc,
+           Annual.Employee.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.E._Calc,
+           Percent.In.Total.Employee.Count..Industry.E._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.H._Calc,
+           Annual.Enterprise.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.Q._Calc,
+           Percent.In.Total.Employee.Count..Industry.H._Calc,
+           Percent.In.Total.Employee.Count..Industry.S._Calc,
+           Percent.In.Total.Employee.Count..Industry.Q._Calc,
+           Percent.In.Total.Employee.Count..Industry.M._Calc,
+           Percent.In.Total.Employee.Count..Industry.P._Calc,
+           Percent.In.Total.Employee.Count..Industry.O._Calc)
+
+# Prepare Test data:
+glm_model_test <- test %>%
+    select(Year,
+           Area.Code,
+           TA.Title,
+           Region.Title,
+           Regional.Industry.GDP.Annual.Total....M.,
+           Housing.Average.Number.of.Active.Bonds.Count,
+           Percent.In.Total.Enterprise.Count..Industry.K._Calc,
+           Property.Regional.Median.Home.Price.Index....,
+           Percent.In.Total.Population..40.64.Yrs.Old._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.L._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.M._Calc,
+           Local.Authority.Financial.Stat..Total.Government.Spending....K.,
+           Population.Estimation...Total.Count,
+           Percent.In.Total.Enterprise.Count..Industry.S._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.N._Calc,
+           Annual.Employee.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.E._Calc,
+           Percent.In.Total.Employee.Count..Industry.E._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.H._Calc,
+           Annual.Enterprise.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.Q._Calc,
+           Percent.In.Total.Employee.Count..Industry.H._Calc,
+           Percent.In.Total.Employee.Count..Industry.S._Calc,
+           Percent.In.Total.Employee.Count..Industry.Q._Calc,
+           Percent.In.Total.Employee.Count..Industry.M._Calc,
+           Percent.In.Total.Employee.Count..Industry.P._Calc,
+           Percent.In.Total.Employee.Count..Industry.O._Calc) 
+
+
+# Perform the regression on the train data
+x <- model.matrix(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Population.Estimation...Total.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.S._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.H._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.H._Calc +
+                   Percent.In.Total.Employee.Count..Industry.S._Calc +
+                   Percent.In.Total.Employee.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.M._Calc +
+                   Percent.In.Total.Employee.Count..Industry.P._Calc +
+                   Percent.In.Total.Employee.Count..Industry.O._Calc, 
+                  data=glm_model_train)
+
+y <- glm_model_train$Regional.Industry.GDP.Annual.Total....M.
+
+lasso_model <- cv.glmnet(x,y,alpha=1,nfolds=5, family = "gaussian")
+
+best_lambda <- lasso_model$lambda.min
+
+lasso_coefs <- coef(lasso_model, s = best_lambda)
+
+
+print(lasso_coefs)
+
+
+# Make predictions on the test data
+x.test <- model.matrix(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Population.Estimation...Total.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.S._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.H._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.H._Calc +
+                   Percent.In.Total.Employee.Count..Industry.S._Calc +
+                   Percent.In.Total.Employee.Count..Industry.Q._Calc +
+                   Percent.In.Total.Employee.Count..Industry.M._Calc +
+                   Percent.In.Total.Employee.Count..Industry.P._Calc +
+                   Percent.In.Total.Employee.Count..Industry.O._Calc, glm_model_test)
+predictions <- lasso_model %>% predict(x.test) %>% as.vector()
+
+# Model performance metrics
+data.frame(
+  RMSE = RMSE(predictions, glm_model_test$Regional.Industry.GDP.Annual.Total....M.),
+  Rsquare = R2(predictions, glm_model_test$Regional.Industry.GDP.Annual.Total....M.)
+)
+
+```
+
+
+
+
+# Lasso Regression on test and train datasets for Post-PCA
+```{r}
+
+
+# Prepare Train data:
+glm_model_train <- train %>%
+    select(Year,
+           Area.Code,
+           TA.Title,
+           Region.Title,
+           Regional.Industry.GDP.Annual.Total....M.,
+           Housing.Average.Number.of.Active.Bonds.Count,
+           Percent.In.Total.Enterprise.Count..Industry.K._Calc,
+           Property.Regional.Median.Home.Price.Index....,
+           Percent.In.Total.Population..40.64.Yrs.Old._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.L._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.M._Calc,
+           Local.Authority.Financial.Stat..Total.Government.Spending....K.,
+           Percent.In.Total.Enterprise.Count..Industry.N._Calc,
+           Annual.Employee.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.E._Calc,
+           Percent.In.Total.Employee.Count..Industry.E._Calc,
+           Annual.Enterprise.Increase.Percent_Calc)
+
+# Prepare Test data:
+glm_model_test <- test %>%
+    select(Year,
+           Area.Code,
+           TA.Title,
+           Region.Title,
+           Regional.Industry.GDP.Annual.Total....M.,
+           Housing.Average.Number.of.Active.Bonds.Count,
+           Percent.In.Total.Enterprise.Count..Industry.K._Calc,
+           Property.Regional.Median.Home.Price.Index....,
+           Percent.In.Total.Population..40.64.Yrs.Old._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.L._Calc,
+           Percent.In.Total.Enterprise.Count..Industry.M._Calc,
+           Local.Authority.Financial.Stat..Total.Government.Spending....K.,
+           Percent.In.Total.Enterprise.Count..Industry.N._Calc,
+           Annual.Employee.Increase.Percent_Calc,
+           Percent.In.Total.Enterprise.Count..Industry.E._Calc,
+           Percent.In.Total.Employee.Count..Industry.E._Calc,
+           Annual.Enterprise.Increase.Percent_Calc) 
+
+
+
+x <- model.matrix(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc, 
+                  data=glm_model_train)
+
+y <- glm_model_train$Regional.Industry.GDP.Annual.Total....M.
+
+lasso_model <- cv.glmnet(x,y,alpha=1,nfolds=5, family = "gaussian")
+
+best_lambda <- lasso_model$lambda.min
+
+lasso_coefs <- coef(lasso_model, s = best_lambda)
+
+
+print(lasso_coefs)
+
+
+# Make predictions on the test data
+x.test <- model.matrix(Regional.Industry.GDP.Annual.Total....M. ~
+                   Housing.Average.Number.of.Active.Bonds.Count +
+                   Percent.In.Total.Enterprise.Count..Industry.K._Calc +
+                   Property.Regional.Median.Home.Price.Index.... +
+                   Percent.In.Total.Population..40.64.Yrs.Old._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.L._Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.M._Calc +
+                   Local.Authority.Financial.Stat..Total.Government.Spending....K. +
+                   Percent.In.Total.Enterprise.Count..Industry.N._Calc +
+                   Annual.Employee.Increase.Percent_Calc +
+                   Percent.In.Total.Enterprise.Count..Industry.E._Calc +
+                   Percent.In.Total.Employee.Count..Industry.E._Calc +
+                   Annual.Enterprise.Increase.Percent_Calc, glm_model_test)
+predictions <- lasso_model %>% predict(x.test) %>% as.vector()
+
+# Model performance metrics
+data.frame(
+  RMSE = RMSE(predictions, glm_model_test$Regional.Industry.GDP.Annual.Total....M.),
+  Rsquare = R2(predictions, glm_model_test$Regional.Industry.GDP.Annual.Total....M.)
+)
+
+```
+
+
+
+# Predicting values on the test data
+```{r}
+# Predict values using the test data
+
+predicted_lm_pre_PCA <- predict(lm_pre_PCA, newdata = test)
+
+predicted_lm_post_PCA <- predict(lm_post_PCA, newdata = test)
+
+```
+
+
+
+# Testing Mean Absolute Error (MAE)
+```{r}
+# The lower the MAE value the better
+
+MAE(test$Regional.Industry.GDP.Annual.Total....M., predicted_lm_pre_PCA)
+
+MAE(test$Regional.Industry.GDP.Annual.Total....M., predicted_lm_post_PCA)
+
+```
+
+
+
+# Testing RMSE on Test Data
+```{r}
+#The larger the difference indicates a larger gap between the predicted and observed values, which means poor regression model fit. In the same way, the smaller RMSE that indicates the better the model.
+
+
+# Calculate the RMSE
+rmse_lm_pre_PCA <- round(sqrt(mean((test$Regional.Industry.GDP.Annual.Total....M. - predicted_lm_pre_PCA)^2)),4)
+
+rmse_lm_post_PCA <- round(sqrt(mean((test$Regional.Industry.GDP.Annual.Total....M. - predicted_lm_post_PCA)^2)),4)
+
+
+
+cat(paste("RMSE score for lm_pre_PCA is:", rmse_lm_pre_PCA), "\n")
+cat(paste("RMSE score for lm_post_PCA is:", rmse_lm_post_PCA), "\n")
+
+
+
+```
+
+
+# Visualizing the Predicted Scores
+```{r}
+# Visualizing Predicted vs Actual for model lm6_train
+ggplot(test, aes(x=predict(lm_pre_PCA, newdata = test), y= test$Regional.Industry.GDP.Annual.Total....M.)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values for pre-PCA linear regression model')
+
+
+# Visualizing Predicted vs Actual for model lm7_train
+ggplot(test, aes(x=predict(lm_post_PCA, newdata = test), y= test$Regional.Industry.GDP.Annual.Total....M.)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values for post-PCA Linear Regression Model')
+```
+
+
+
+
+# Times series clustering
+
+# Preparing Datasets for clustering
+```{r}
+main_df <- df4 %>% 
+    select(Year,`Region Title`, Annual.GDP.Increase.Percent_Calc)
+
+glimpse(main_df)
+
+```
+
+
+
+# Hierarchical Clustering Main df
+```{r}
+#hierarchical clustering with 10% window size for up to k=20 clusters
+
+df_list <- as.list(utils::unstack(main_df,Annual.GDP.Increase.Percent_Calc ~ `Region Title`))
+
+#df_list_z <- dtwclust::zscore(df_list)
+
+cluster_dtw_h <-list()
+for (i in 2:20)
+{
+  cluster_dtw_h[[i]] <- tsclust(df_list, type = "h", k = i,  distance = "dtw", control = hierarchical_control(method = "complete"), seed = 390, preproc = NULL, args = tsclust_args(dist = list(window.size = 5L)))
+}
+
+# take a look at the object
+cluster_dtw_h[[20]]
+
+
+# some cluster information
+cluster_dtw_h[[20]]@clusinfo
+
+
+# Cluster Memberships
+cluster_membership <- cluster_dtw_h[[20]]@cluster
+
+# Convert the cluster membership into a dataframe
+cluster_membership <- data.frame(cluster_membership)
+
+
+
+# plot dendrogram and color the labels and branches
+dend <- as.dendrogram(cluster_dtw_h[[20]])
+library(dendextend)
+dend <- dend %>%
+         color_branches(k = 20) %>%
+         set("branches_lwd", c(2,1,2)) %>%
+         set("branches_lty", c(1,2,1))
+
+plot(dend)
+
+# Plot dendorgram plain
+plot(cluster_dtw_h[[20]])
+
+#  The series and the obtained prototypes can be plotted too
+clus1_series <- plot(cluster_dtw_h[[20]], type = "sc")
+ggplotly(clus1_series)
+
+# Plot focusing on one cluster
+series_plotly <- plot(cluster_dtw_h[[20]],type="series",clus=2L)
+ggplotly(series_plotly)
+
+# Extract shapr of one cluster
+plot(cluster_dtw_h[[20]],type="centroids",clus=2L)
+
+# Measure the Silhouette Index
+cvi(cluster_dtw_h[[20]], b = NULL, type = "Sil")
+
+```
+
+
+# Calculating the averages to determine highest performing Territorial Authority
+```{r}
+# Calculate the average annual GDP increase percent per Territorial Authority
+
+main_df_avg <- main_df %>% filter(`Region Title` %in% c("Timaru District", 
+                                                      "Invercargill City", 
+                                                      "Wellington City",
+                                                      "Whakatane District",
+                                                      "Rotorua District",
+                                                      "Hastings District",
+                                                      "Masterton District",
+                                                      "Christchurch City",
+                                                      "Dunedin City",
+                                                      "Auckland",
+                                                      "Napier City",
+                                                      "Porirua City",
+                                                      "Tasman District",
+                                                      "Hamilton City",
+                                                      "Horowhenua District",
+                                                      "Kapiti Coast District",
+                                                      "Tauranga City")) %>% 
+  group_by(`Region Title`) %>%
+  summarise(avg_annual_gdp_increase = mean(Annual.GDP.Increase.Percent_Calc))
+
+
+```
+
+# Timeseries visualization of focused areas
+```{r}
+Avg_cluster <-main_df %>% 
+    filter(`Region Title` %in% c("Timaru District", 
+                                                      "Invercargill City", 
+                                                      "Wellington City",
+                                                      "Whakatane District",
+                                                      "Rotorua District",
+                                                      "Hastings District",
+                                                      "Masterton District",
+                                                      "Christchurch City",
+                                                      "Dunedin City",
+                                                      "Auckland",
+                                                      "Napier City",
+                                                      "Porirua City",
+                                                      "Tasman District",
+                                                      "Hamilton City",
+                                                      "Horowhenua District",
+                                                      "Kapiti Coast District",
+                                                      "Tauranga City")) %>% 
+    ggplot(aes(Year,Annual.GDP.Increase.Percent_Calc,group=`Region Title`))+
+    geom_point(aes(color=`Region Title`))+
+    geom_line(aes(color=`Region Title`))+
+    scale_y_continuous(labels=scales::percent_format())+
+    theme_tq()+
+    labs(title="Areas of Interest",
+         subtitle="Annual GDP Increase Percent by Year",
+         caption="2000-2019",
+         x="Year",
+         y="Annual Increase Percent")
+
+Avg_cluster
+
+ggplotly(Avg_cluster)
+```
+
+# Forecasting
+```{r}
+forecast_tbl <- df2 %>%
+    ungroup() %>% 
+    filter(`Region Title` %in% c("Tauranga City",
+                                 "Tasman District",
+                                 "Hamilton City",
+                                 "Timaru District",
+                                 "Auckland",
+                                 "Porirua City",
+                                 "Christchurch City",
+                                 "Whakatane District",
+                                 "Hastings District",
+                                 "Invercargill City",
+                                 "Kapiti Coast District",
+                                 "Masterton District",
+                                 "Rotorua District",
+                                 "Horowhenua District",
+                                 "Dunedin City",
+                                 "Wellington City",
+                                 "Napier City")) %>%
+    mutate(Year=ymd(Year,truncated = 2L)) %>% 
+    select( `Region Title`,Year, `Regional Industry GDP-Annual Total ($ M)`) %>% 
+    nest(nested_column=-`Region Title`)
+
+
+model_table <- forecast_tbl %>% 
+    #Map Fitted Models
+    mutate(fitted_model=map(nested_column, .f=function(df){
+        arima_reg(seasonal_period = 1 ) %>% 
+            set_engine("auto_arima") %>% 
+            fit(`Regional Industry GDP-Annual Total ($ M)` ~ Year, data=df)
+    })) %>% 
+    
+    #Map Forecasts
+    mutate(nested_forecast = map2(fitted_model, nested_column, .f=function(arima_model, df){
+        modeltime_table(
+            arima_model
+        ) %>% 
+            modeltime_forecast(
+                h=10,
+                actual_data = df
+            )
+    }))
+
+model_table %>% 
+    select(`Region Title`,nested_forecast) %>% 
+    unnest(nested_forecast) %>% 
+    group_by(`Region Title`) %>% 
+    plot_modeltime_forecast(.facet_ncol = 3)
+
+ratio_tbl <- model_table %>%
+    select(`Region Title`,nested_forecast) %>% 
+    unnest(nested_forecast) 
+
+
+
+P <- ratio_tbl %>% 
+    select(.index,`Region Title`,.value) %>% 
+    rename(Year=.index,Region=`Region Title`,GDP =.value) %>% 
+    group_by(Region) %>%
+    mutate(`Annual GDP Increase Percent_Calc`=((GDP-dplyr::lag(GDP))/dplyr::lag(GDP))) %>% 
+    ungroup() %>% 
+    mutate(`Annual GDP Increase Percent_Calc`=ifelse(is.na(`Annual GDP Increase Percent_Calc`),0,`Annual GDP Increase Percent_Calc`)) %>% 
+    ggplot(aes(Year, `Annual GDP Increase Percent_Calc`,group=Region))+ 
+    geom_point(aes(color=Region))+
+    geom_line(aes(color=Region))+
+    theme_tq()+
+    theme(legend.position = "below")
+
+ggplotly(P)
+```
+
